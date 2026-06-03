@@ -6,8 +6,8 @@ resource "snowflake_storage_integration" "s3_int" {
   type                      = "EXTERNAL_STAGE"
   enabled                   = true
   storage_provider          = "S3"
-  storage_aws_role_arn      = "arn:aws:iam::160621358952:role/snowflake_demo_role"
-  storage_allowed_locations = ["s3://anchor-demo-mybucket/messages/"]
+  storage_aws_role_arn      = var.snowflake_aws_role_arn
+  storage_allowed_locations = [var.s3_bucket_url]
   comment                   = "Storage integration for S3 mail data."
 }
 
@@ -22,8 +22,6 @@ resource "snowflake_file_format" "mail_jsonl_format" {
   strip_outer_array  = false
   ignore_utf8_errors = true
   comment            = "File format for mail JSONL files."
-
-  depends_on = [snowflake_schema.training_raw]
 }
 
 # ==========================================
@@ -33,16 +31,10 @@ resource "snowflake_stage" "st_s3_mail" {
   database            = snowflake_database.training_db.name
   schema              = snowflake_schema.training_raw.name
   name                = "ST_S3_MAIL"
-  url                 = "s3://anchor-demo-mybucket/messages/"
+  url                 = var.s3_bucket_url
   storage_integration = snowflake_storage_integration.s3_int.name
-  file_format         = "FORMAT_NAME = ${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.MAIL_JSONL_FORMAT"
+  file_format         = "FORMAT_NAME = ${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.${snowflake_file_format.mail_jsonl_format.name}"
   comment             = "External stage for mail data from S3."
-
-  depends_on = [
-    snowflake_schema.training_raw,
-    snowflake_file_format.mail_jsonl_format,
-    snowflake_storage_integration.s3_int
-  ]
 }
 
 # ==========================================
@@ -134,8 +126,6 @@ resource "snowflake_table" "mails_raw" {
     name = "REFERAL_COMPANY"
     type = "VARCHAR"
   }
-
-  depends_on = [snowflake_schema.training_raw]
 }
 
 # ==========================================
@@ -148,42 +138,32 @@ resource "snowflake_pipe" "pipe_s3_to_mails_raw" {
   auto_ingest = true
   comment     = "Snowpipe for auto-ingesting mail data from S3."
 
-  copy_statement = "COPY INTO ${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.MAILS_RAW FROM @${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.ST_S3_MAIL MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"
-
-  depends_on = [
-    snowflake_table.mails_raw,
-    snowflake_stage.st_s3_mail
-  ]
+  copy_statement = "COPY INTO ${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.${snowflake_table.mails_raw.name} FROM @${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.${snowflake_stage.st_s3_mail.name} MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"
 }
 
 # ==========================================
 # 権限付与
 # ==========================================
-# Storage IntegrationへのUSAGE権限
 resource "snowflake_grant_privileges_to_account_role" "s3_int_usage" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["USAGE"]
   on_account_object {
     object_type = "INTEGRATION"
     object_name = snowflake_storage_integration.s3_int.name
   }
-  depends_on = [snowflake_storage_integration.s3_int]
 }
 
-# MAILS_RAWテーブルへの権限（一本化）
 resource "snowflake_grant_privileges_to_account_role" "mails_raw_grants" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"]
   on_schema_object {
     object_type = "TABLE"
-    object_name = "${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.MAILS_RAW"
+    object_name = "${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.${snowflake_table.mails_raw.name}"
   }
-  depends_on = [snowflake_table.mails_raw]
 }
 
-# 将来作成されるテーブルへの権限
 resource "snowflake_grant_privileges_to_account_role" "future_table_grants" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["SELECT", "INSERT", "UPDATE", "DELETE"]
   on_schema_object {
     future {
@@ -193,20 +173,17 @@ resource "snowflake_grant_privileges_to_account_role" "future_table_grants" {
   }
 }
 
-# ST_S3_MAILステージへの権限
 resource "snowflake_grant_privileges_to_account_role" "stage_usage" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["USAGE", "READ"]
   on_schema_object {
     object_type = "STAGE"
-    object_name = "${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.ST_S3_MAIL"
+    object_name = "${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.${snowflake_stage.st_s3_mail.name}"
   }
-  depends_on = [snowflake_stage.st_s3_mail]
 }
 
-# 将来作成されるステージへの権限
 resource "snowflake_grant_privileges_to_account_role" "future_stage_usage" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["USAGE", "READ"]
   on_schema_object {
     future {
@@ -216,20 +193,17 @@ resource "snowflake_grant_privileges_to_account_role" "future_stage_usage" {
   }
 }
 
-# MAIL_JSONL_FORMATへの権限
 resource "snowflake_grant_privileges_to_account_role" "file_format_usage" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["USAGE"]
   on_schema_object {
     object_type = "FILE FORMAT"
-    object_name = "${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.MAIL_JSONL_FORMAT"
+    object_name = "${snowflake_database.training_db.name}.${snowflake_schema.training_raw.name}.${snowflake_file_format.mail_jsonl_format.name}"
   }
-  depends_on = [snowflake_file_format.mail_jsonl_format]
 }
 
-# 将来作成されるFILE FORMATへの権限
 resource "snowflake_grant_privileges_to_account_role" "future_file_format_usage" {
-  account_role_name = "FR_ANCHOR_DEMO_ROLE"
+  account_role_name = var.snowflake_role_name
   privileges        = ["USAGE"]
   on_schema_object {
     future {
